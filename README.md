@@ -3,7 +3,7 @@
 A desktop application for **AES-256-GCM encryption** of files, text, and passwords — entirely local, no network access, no cloud.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-GPLv3-blue)
 
 ---
 
@@ -128,4 +128,4 @@ EncryptionApp-v2/
 
 ## License
 
-This project is licensed under the [GNU GPLv3](LICENSE).
+This project is licensed under the [GPLv3](LICENSE).
