@@ -86,29 +86,8 @@ def encrypt_file(
     try:
         with open(src, "rb") as fin, open(dst, "wb") as fout:
             _write_header(fout, salt, num_chunks)
-
-            bytes_done = 0
-            while True:
-                _check_cancel(cancel_flag)
-                chunk = fin.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                nonce = generate_nonce()
-                ct = aesgcm.encrypt(nonce, chunk, None)
-                fout.write(nonce)
-                fout.write(struct.pack("<I", len(ct)))
-                fout.write(ct)
-
-                bytes_done += len(chunk)
-                if progress_cb and file_size > 0:
-                    progress_cb(bytes_done / file_size)
-
-            # Append encrypted original filename
-            fn_nonce = generate_nonce()
-            fn_ct = aesgcm.encrypt(fn_nonce, filename_bytes, None)
-            fout.write(fn_nonce)
-            fout.write(struct.pack("<I", len(fn_ct)))
-            fout.write(fn_ct)
+            _encrypt_chunks(fin, fout, aesgcm, filename_bytes, file_size,
+                            progress_cb, cancel_flag)
     except BaseException:
         if os.path.exists(dst):
             os.remove(dst)
@@ -121,6 +100,8 @@ def decrypt_file(
     key: bytes,
     progress_cb: Optional[ProgressCallback] = None,
     cancel_flag: Optional[List[bool]] = None,
+    _start_offset: int = 0,
+    dst_name: Optional[str] = None,
 ) -> str:
     """
     Decrypt a chunked AES-256-GCM file produced by :func:`encrypt_file`.
@@ -131,6 +112,7 @@ def decrypt_file(
         key:         32-byte AES-256 key.
         progress_cb: Called with a float in [0.0, 1.0] as chunks are decrypted.
         cancel_flag: A mutable list[bool]; set cancel_flag[0] = True to abort.
+        dst_name:    If given, use this filename instead of the embedded original name.
 
     Returns:
         Absolute path to the decrypted output file.
@@ -143,41 +125,48 @@ def decrypt_file(
     aesgcm = AESGCM(key)
 
     with open(src, "rb") as fin:
+        if _start_offset:
+            fin.seek(_start_offset)
         _read_and_validate_header(fin)
         num_chunks = struct.unpack("<Q", fin.read(8))[0]
 
-        chunks = []
+        # Pass 1: seek over every chunk body to reach the filename at EOF.
+        # Only nonce+ct_len headers are read — ciphertext is skipped entirely,
+        # so RAM usage stays O(1) regardless of file size.
+        chunks_start = fin.tell()
         for _ in range(num_chunks):
-            _check_cancel(cancel_flag)
-            nonce = fin.read(NONCE_SIZE)
+            fin.read(NONCE_SIZE)                         # skip nonce
             ct_len = struct.unpack("<I", fin.read(4))[0]
-            ct = fin.read(ct_len)
-            chunks.append((nonce, ct))
+            fin.seek(ct_len, 1)                          # skip ciphertext
 
         fn_nonce = fin.read(NONCE_SIZE)
         fn_ct_len = struct.unpack("<I", fin.read(4))[0]
         fn_ct = fin.read(fn_ct_len)
 
-    # Recover original filename (best-effort; fall back gracefully)
-    try:
-        original_name = aesgcm.decrypt(fn_nonce, fn_ct, None).decode("utf-8")
-    except Exception:
-        original_name = "decrypted_file"
+        # Recover original filename (best-effort; fall back gracefully)
+        try:
+            original_name = aesgcm.decrypt(fn_nonce, fn_ct, None).decode("utf-8")
+        except Exception:
+            original_name = "decrypted_file"
 
-    output_path = os.path.join(dst_dir, original_name)
-    total = len(chunks)
+        output_path = os.path.join(dst_dir, dst_name if dst_name else original_name)
 
-    try:
-        with open(output_path, "wb") as fout:
-            for i, (nonce, ct) in enumerate(chunks):
-                _check_cancel(cancel_flag)
-                fout.write(aesgcm.decrypt(nonce, ct, None))
-                if progress_cb:
-                    progress_cb((i + 1) / total)
-    except BaseException:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        raise
+        # Pass 2: stream-decrypt each chunk directly to disk one at a time.
+        fin.seek(chunks_start)
+        try:
+            with open(output_path, "wb") as fout:
+                for i in range(num_chunks):
+                    _check_cancel(cancel_flag)
+                    nonce = fin.read(NONCE_SIZE)
+                    ct_len = struct.unpack("<I", fin.read(4))[0]
+                    ct = fin.read(ct_len)
+                    fout.write(aesgcm.decrypt(nonce, ct, None))
+                    if progress_cb:
+                        progress_cb((i + 1) / num_chunks)
+        except BaseException:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            raise
 
     return output_path
 
@@ -198,21 +187,25 @@ def encrypt_file_with_password(
     salt = generate_salt()
     key = derive_key_scrypt(password, salt)
 
-    tmp_path = dst + ".tmp_enc"
+    src_path = Path(src)
+    file_size = src_path.stat().st_size
+    filename_bytes = src_path.name.encode("utf-8")
+    aesgcm = AESGCM(key)
+    num_chunks = max(1, (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE)
+    inner_salt = generate_salt()
+
     try:
-        encrypt_file(src, tmp_path, key, progress_cb, cancel_flag)
-        # Wrap: PASSWORD_FILE_MARKER + salt + encrypted-file content
-        with open(tmp_path, "rb") as fin, open(dst, "wb") as fout:
+        with open(src, "rb") as fin, open(dst, "wb") as fout:
+            # Write password wrapper prefix, then stream-encrypt directly.
             fout.write(PASSWORD_FILE_MARKER)
             fout.write(salt)
-            fout.write(fin.read())
+            _write_header(fout, inner_salt, num_chunks)
+            _encrypt_chunks(fin, fout, aesgcm, filename_bytes, file_size,
+                            progress_cb, cancel_flag)
     except BaseException:
         if os.path.exists(dst):
             os.remove(dst)
         raise
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
 
 def decrypt_file_with_password(
@@ -221,6 +214,7 @@ def decrypt_file_with_password(
     password: str,
     progress_cb: Optional[ProgressCallback] = None,
     cancel_flag: Optional[List[bool]] = None,
+    dst_name: Optional[str] = None,
 ) -> str:
     """
     Decrypt a file previously encrypted with :func:`encrypt_file_with_password`.
@@ -240,21 +234,50 @@ def decrypt_file_with_password(
                 "(missing PWENC1 marker). Use key-file decryption instead."
             )
         salt = fin.read(SALT_SIZE)
-        inner_data = fin.read()
 
     key = derive_key_scrypt(password, salt)
 
-    tmp_path = src + ".tmp_dec"
-    try:
-        with open(tmp_path, "wb") as fout:
-            fout.write(inner_data)
-        return decrypt_file(tmp_path, dst_dir, key, progress_cb, cancel_flag)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    # Decrypt directly from the source without a temp copy.
+    start_offset = len(PASSWORD_FILE_MARKER) + SALT_SIZE
+    return decrypt_file(src, dst_dir, key, progress_cb, cancel_flag,
+                        _start_offset=start_offset, dst_name=dst_name)
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
+
+def _encrypt_chunks(
+    fin,
+    fout,
+    aesgcm: AESGCM,
+    filename_bytes: bytes,
+    file_size: int,
+    progress_cb: Optional[ProgressCallback],
+    cancel_flag: Optional[List[bool]],
+) -> None:
+    """Stream-encrypt all chunks from *fin* into *fout*, then append the
+    encrypted filename.  No temporary files are created."""
+    bytes_done = 0
+    while True:
+        _check_cancel(cancel_flag)
+        chunk = fin.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        nonce = generate_nonce()
+        ct = aesgcm.encrypt(nonce, chunk, None)
+        fout.write(nonce)
+        fout.write(struct.pack("<I", len(ct)))
+        fout.write(ct)
+        bytes_done += len(chunk)
+        if progress_cb and file_size > 0:
+            progress_cb(bytes_done / file_size)
+
+    # Append encrypted original filename
+    fn_nonce = generate_nonce()
+    fn_ct = aesgcm.encrypt(fn_nonce, filename_bytes, None)
+    fout.write(fn_nonce)
+    fout.write(struct.pack("<I", len(fn_ct)))
+    fout.write(fn_ct)
+
 
 def _write_header(fout, salt: bytes, num_chunks: int) -> None:
     fout.write(FILE_MAGIC)

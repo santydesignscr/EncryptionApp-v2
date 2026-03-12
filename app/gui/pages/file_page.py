@@ -209,10 +209,15 @@ class FilePage(ctk.CTkFrame):
             types    = [("All files", "*.*")]
             if orig_ext:
                 types.insert(0, (f"{orig_ext.lstrip('.')} files", f"*{orig_ext}"))
+        current_dst = self._dst_var.get().strip()
+        init_dir  = str(Path(current_dst).parent) if current_dst else ""
+        init_file = Path(current_dst).name         if current_dst else ""
         path = filedialog.asksaveasfilename(
             title="Select output file",
             defaultextension=ext,
             filetypes=types,
+            initialdir=init_dir,
+            initialfile=init_file,
         )
         if path:
             self._dst_user_edited = True
@@ -345,6 +350,7 @@ class FilePage(ctk.CTkFrame):
                     result_path = decrypt_file(
                         src, str(Path(dst).parent), key,
                         self._reporter.progress, cancel_flag,
+                        dst_name=Path(dst).name,
                     )
             else:
                 assert isinstance(key_data, str)
@@ -358,6 +364,7 @@ class FilePage(ctk.CTkFrame):
                     result_path = decrypt_file_with_password(
                         src, str(Path(dst).parent), pw,
                         self._reporter.progress, cancel_flag,
+                        dst_name=Path(dst).name,
                     )
 
             verb = "Encrypted" if mode == "encrypt" else "Decrypted"
@@ -380,6 +387,8 @@ class FilePage(ctk.CTkFrame):
     def _done(self, success: bool, message: str, show_error: bool = False) -> None:
         self._encrypt_btn.configure(state="normal")
         self._decrypt_btn.configure(state="normal")
+        # Reset so the next source selection re-triggers the auto-suggestion.
+        self._dst_user_edited = False
         if success:
             self._set_status(f"✅  {message}", "#4caf7d")
         else:
