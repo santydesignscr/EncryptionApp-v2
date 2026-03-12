@@ -96,6 +96,29 @@ python main.py
 
 ---
 
+## Building a Standalone Executable
+
+Use [PyInstaller](https://pyinstaller.org/) to produce a single `EncryptionApp.exe` that requires no Python installation on the target machine.
+
+```bash
+# Install PyInstaller (one-time)
+pip install pyinstaller
+
+# Build
+pyinstaller --onefile --windowed --collect-data customtkinter --name EncryptionApp main.py
+```
+
+| Flag | Purpose |
+|---|---|
+| `--onefile` | Bundle everything into a single `.exe` |
+| `--windowed` | No console window (GUI app) |
+| `--collect-data customtkinter` | Include customtkinter themes and assets |
+| `--name EncryptionApp` | Output file name |
+
+The executable is written to `dist\EncryptionApp.exe`. The `build\` folder and `*.spec` file are intermediate artifacts and can be deleted afterwards.
+
+---
+
 ## Project Structure
 
 ```
