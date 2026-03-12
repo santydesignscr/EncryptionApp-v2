@@ -51,7 +51,7 @@ customtkinter >= 5.2.0
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/EncryptionApp-v2.git
+git clone https://github.com/santydesignscr/EncryptionApp-v2.git
 cd EncryptionApp-v2
 
 # 2. (Recommended) Create a virtual environment
